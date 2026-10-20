@@ -49,6 +49,9 @@ func (d *Wopan) GetAddition() driver.Additional {
 func (d *Wopan) Init(ctx context.Context) error {
 	d.client = wopan.DefaultWithRefreshToken(d.RefreshToken)
 	d.client.SetAccessToken(d.AccessToken)
+	if d.BypassUploadSNI {
+		d.client.SetSNIBypass(true)
+	}
 	d.client.OnRefreshToken(d.onTokenRefreshed)
 	return d.initClient(ctx)
 }
