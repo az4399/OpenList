@@ -1,0 +1,106 @@
+name: Build & Push Docker Image (linux/amd64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build & Publish Container (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout OpenList
+        uses: actions/checkout@v4
+        with:
+          path: OpenList
+
+      - name: Checkout wopan-sdk-go
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/wopan-sdk-go
+          path: wopan-sdk-go
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          check-latest: true
+
+      - name: Fetch Frontend Assets
+        working-directory: OpenList
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "Fetching frontend release assets from OpenListTeam/OpenList-Frontend..."
+          RELEASE_JSON=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases/latest")
+          TAR_URL=$(echo "$RELEASE_JSON" | grep "browser_download_url" | grep "openlist-frontend-dist-v" | head -n 1 | cut -d '"' -f 4)
+          if [ -z "$TAR_URL" ]; then
+            TAR_URL=$(echo "$RELEASE_JSON" | grep "browser_download_url" | grep "openlist-frontend-dist" | grep -v "lite" | head -n 1 | cut -d '"' -f 4)
+          fi
+          echo "Downloading frontend from: $TAR_URL"
+          curl -fsSL "$TAR_URL" -o dist.tar.gz
+          mkdir -p public/dist
+          tar -zxvf dist.tar.gz -C public/dist
+          rm -f dist.tar.gz
+          test -f public/dist/index.html || { echo "index.html missing!"; exit 1; }
+          echo "Frontend successfully extracted."
+
+      - name: Compile OpenList Binary (linux/amd64)
+        working-directory: OpenList
+        run: |
+          set -e
+          BUILT_AT=$(date +'%F %T %z')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
+          
+          echo "Building OpenList linux-amd64 ($VERSION, commit: $GIT_COMMIT)..."
+          mkdir -p bin
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -tags=jsoniter \
+            -ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION'" \
+            -o bin/openlist .
+          ls -lh bin/openlist
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: OpenList
+          file: OpenList/Dockerfile.amd64
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
